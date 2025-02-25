@@ -1,34 +1,57 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from sklearn.metrics import accuracy_score
+from collections import deque
 from typing import Dict, List, Tuple, Optional, Union, Any
 
 
 class TextJEPAMetrics:
     """
-    Metrics for evaluating Text-JEPA models.
+    Metrics for evaluating Text-JEPA models with rolling average support.
 
     Includes both training metrics (L2 loss, cosine similarity)
     and optional downstream metrics if labels are provided.
     """
 
-    def __init__(self):
+    def __init__(self, window_size=100, use_rolling=True):
+        """
+        Initialize metrics tracker.
+
+        Args:
+            window_size: Number of batches to include in rolling average
+            use_rolling: Whether to use rolling window (True) or reset-based (False) metrics
+        """
+        self.window_size = window_size
+        self.use_rolling = use_rolling
         self.reset()
 
     def reset(self):
         """Reset all metrics accumulated so far."""
-        self.l2_loss_sum = 0.0
-        self.cosine_sim_sum = 0.0
-        self.count = 0
+        if self.use_rolling:
+            # Use deques with max length to maintain rolling window
+            self.l2_losses = deque(maxlen=self.window_size)
+            self.cosine_sims = deque(maxlen=self.window_size)
 
-        # New metrics for non-matching similarity
-        self.avg_nonmatching_pred_similarity_sum = 0.0
-        self.max_nonmatching_pred_similarity_sum = 0.0
-        self.min_nonmatching_pred_similarity_sum = 0.0
-        self.avg_nonmatching_target_similarity_sum = 0.0
-        self.max_nonmatching_target_similarity_sum = 0.0
-        self.min_nonmatching_target_similarity_sum = 0.0
+            # Non-matching similarities
+            self.avg_nonmatching_pred_similarities = deque(maxlen=self.window_size)
+            self.max_nonmatching_pred_similarities = deque(maxlen=self.window_size)
+            self.min_nonmatching_pred_similarities = deque(maxlen=self.window_size)
+            self.avg_nonmatching_target_similarities = deque(maxlen=self.window_size)
+            self.max_nonmatching_target_similarities = deque(maxlen=self.window_size)
+            self.min_nonmatching_target_similarities = deque(maxlen=self.window_size)
+        else:
+            # Original accumulation approach
+            self.l2_loss_sum = 0.0
+            self.cosine_sim_sum = 0.0
+            self.count = 0
+
+            # New metrics for non-matching similarity
+            self.avg_nonmatching_pred_similarity_sum = 0.0
+            self.max_nonmatching_pred_similarity_sum = 0.0
+            self.min_nonmatching_pred_similarity_sum = 0.0
+            self.avg_nonmatching_target_similarity_sum = 0.0
+            self.max_nonmatching_target_similarity_sum = 0.0
+            self.min_nonmatching_target_similarity_sum = 0.0
 
     def update(self, predicted_reprs, target_reprs, additional_metrics=None):
         """
@@ -122,71 +145,135 @@ class TextJEPAMetrics:
 
         # Update metrics if we processed at least one valid example
         if valid_count > 0:
-            self.l2_loss_sum += total_l2_loss / valid_count
-            self.cosine_sim_sum += total_cosine_sim / valid_count
-            self.count += 1
+            if self.use_rolling:
+                self.l2_losses.append(total_l2_loss / valid_count)
+                self.cosine_sims.append(total_cosine_sim / valid_count)
+            else:
+                self.l2_loss_sum += total_l2_loss / valid_count
+                self.cosine_sim_sum += total_cosine_sim / valid_count
+                self.count += 1
 
         # Update additional non-matching similarity metrics if provided
         if additional_metrics:
             if "avg_nonmatching_pred_similarity" in additional_metrics:
-                self.avg_nonmatching_pred_similarity_sum += additional_metrics[
-                    "avg_nonmatching_pred_similarity"
-                ]
-                self.max_nonmatching_pred_similarity_sum += additional_metrics[
-                    "max_nonmatching_pred_similarity"
-                ]
-                self.min_nonmatching_pred_similarity_sum += additional_metrics[
-                    "min_nonmatching_pred_similarity"
-                ]
-                self.avg_nonmatching_target_similarity_sum += additional_metrics[
-                    "avg_nonmatching_target_similarity"
-                ]
-                self.max_nonmatching_target_similarity_sum += additional_metrics[
-                    "max_nonmatching_target_similarity"
-                ]
-                self.min_nonmatching_target_similarity_sum += additional_metrics[
-                    "min_nonmatching_target_similarity"
-                ]
-                if (
-                    valid_count == 0
-                ):  # If no representation processing but we have metrics
-                    self.count += 1
+                if self.use_rolling:
+                    self.avg_nonmatching_pred_similarities.append(
+                        additional_metrics["avg_nonmatching_pred_similarity"]
+                    )
+                    self.max_nonmatching_pred_similarities.append(
+                        additional_metrics["max_nonmatching_pred_similarity"]
+                    )
+                    self.min_nonmatching_pred_similarities.append(
+                        additional_metrics["min_nonmatching_pred_similarity"]
+                    )
+                    self.avg_nonmatching_target_similarities.append(
+                        additional_metrics["avg_nonmatching_target_similarity"]
+                    )
+                    self.max_nonmatching_target_similarities.append(
+                        additional_metrics["max_nonmatching_target_similarity"]
+                    )
+                    self.min_nonmatching_target_similarities.append(
+                        additional_metrics["min_nonmatching_target_similarity"]
+                    )
+                else:
+                    self.avg_nonmatching_pred_similarity_sum += additional_metrics[
+                        "avg_nonmatching_pred_similarity"
+                    ]
+                    self.max_nonmatching_pred_similarity_sum += additional_metrics[
+                        "max_nonmatching_pred_similarity"
+                    ]
+                    self.min_nonmatching_pred_similarity_sum += additional_metrics[
+                        "min_nonmatching_pred_similarity"
+                    ]
+                    self.avg_nonmatching_target_similarity_sum += additional_metrics[
+                        "avg_nonmatching_target_similarity"
+                    ]
+                    self.max_nonmatching_target_similarity_sum += additional_metrics[
+                        "max_nonmatching_target_similarity"
+                    ]
+                    self.min_nonmatching_target_similarity_sum += additional_metrics[
+                        "min_nonmatching_target_similarity"
+                    ]
+                    if (
+                        valid_count == 0
+                    ):  # If no representation processing but we have metrics
+                        self.count += 1
 
     def compute(self) -> Dict[str, float]:
         """
-        Compute final metrics.
+        Compute metrics from accumulated values.
 
         Returns:
             metrics: Dictionary of metrics
         """
-        if self.count == 0:
-            return {
-                "l2_loss": 0.0,
-                "cosine_similarity": 0.0,
-                "avg_nonmatching_pred_similarity": 0.0,
-                "max_nonmatching_pred_similarity": 0.0,
-                "min_nonmatching_pred_similarity": 0.0,
-                "avg_nonmatching_target_similarity": 0.0,
-                "max_nonmatching_target_similarity": 0.0,
-                "min_nonmatching_target_similarity": 0.0,
-            }
-
-        return {
-            "l2_loss": self.l2_loss_sum / self.count,
-            "cosine_similarity": self.cosine_sim_sum / self.count,
-            "avg_nonmatching_pred_similarity": self.avg_nonmatching_pred_similarity_sum
-            / self.count,
-            "max_nonmatching_pred_similarity": self.max_nonmatching_pred_similarity_sum
-            / self.count,
-            "min_nonmatching_pred_similarity": self.min_nonmatching_pred_similarity_sum
-            / self.count,
-            "avg_nonmatching_target_similarity": self.avg_nonmatching_target_similarity_sum
-            / self.count,
-            "max_nonmatching_target_similarity": self.max_nonmatching_target_similarity_sum
-            / self.count,
-            "min_nonmatching_target_similarity": self.min_nonmatching_target_similarity_sum
-            / self.count,
+        # Default values if no data
+        default_metrics = {
+            "l2_loss": 0.0,
+            "cosine_similarity": 0.0,
+            "avg_nonmatching_pred_similarity": 0.0,
+            "max_nonmatching_pred_similarity": 0.0,
+            "min_nonmatching_pred_similarity": 0.0,
+            "avg_nonmatching_target_similarity": 0.0,
+            "max_nonmatching_target_similarity": 0.0,
+            "min_nonmatching_target_similarity": 0.0,
         }
+
+        if self.use_rolling:
+            # Calculate averages using rolling window if we have data
+            if len(self.l2_losses) > 0:
+                default_metrics["l2_loss"] = sum(self.l2_losses) / len(self.l2_losses)
+
+            if len(self.cosine_sims) > 0:
+                default_metrics["cosine_similarity"] = sum(self.cosine_sims) / len(
+                    self.cosine_sims
+                )
+
+            if len(self.avg_nonmatching_pred_similarities) > 0:
+                default_metrics["avg_nonmatching_pred_similarity"] = sum(
+                    self.avg_nonmatching_pred_similarities
+                ) / len(self.avg_nonmatching_pred_similarities)
+                default_metrics["max_nonmatching_pred_similarity"] = sum(
+                    self.max_nonmatching_pred_similarities
+                ) / len(self.max_nonmatching_pred_similarities)
+                default_metrics["min_nonmatching_pred_similarity"] = sum(
+                    self.min_nonmatching_pred_similarities
+                ) / len(self.min_nonmatching_pred_similarities)
+                default_metrics["avg_nonmatching_target_similarity"] = sum(
+                    self.avg_nonmatching_target_similarities
+                ) / len(self.avg_nonmatching_target_similarities)
+                default_metrics["max_nonmatching_target_similarity"] = sum(
+                    self.max_nonmatching_target_similarities
+                ) / len(self.max_nonmatching_target_similarities)
+                default_metrics["min_nonmatching_target_similarity"] = sum(
+                    self.min_nonmatching_target_similarities
+                ) / len(self.min_nonmatching_target_similarities)
+        else:
+            # Original approach with sum and count
+            if self.count == 0:
+                return default_metrics
+
+            default_metrics["l2_loss"] = self.l2_loss_sum / self.count
+            default_metrics["cosine_similarity"] = self.cosine_sim_sum / self.count
+            default_metrics["avg_nonmatching_pred_similarity"] = (
+                self.avg_nonmatching_pred_similarity_sum / self.count
+            )
+            default_metrics["max_nonmatching_pred_similarity"] = (
+                self.max_nonmatching_pred_similarity_sum / self.count
+            )
+            default_metrics["min_nonmatching_pred_similarity"] = (
+                self.min_nonmatching_pred_similarity_sum / self.count
+            )
+            default_metrics["avg_nonmatching_target_similarity"] = (
+                self.avg_nonmatching_target_similarity_sum / self.count
+            )
+            default_metrics["max_nonmatching_target_similarity"] = (
+                self.max_nonmatching_target_similarity_sum / self.count
+            )
+            default_metrics["min_nonmatching_target_similarity"] = (
+                self.min_nonmatching_target_similarity_sum / self.count
+            )
+
+        return default_metrics
 
     def compute_per_span(
         self, predicted_reprs: List[torch.Tensor], target_reprs: List[torch.Tensor]

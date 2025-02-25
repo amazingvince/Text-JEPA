@@ -260,6 +260,11 @@ def main():
             f"Gradient accumulation steps set to {args.gradient_accumulation_steps}"
         )
 
+    if "evaluation" not in config:
+        config["evaluation"] = {}
+    if "metrics_window_size" not in config["evaluation"]:
+        config["evaluation"]["metrics_window_size"] = 100  # Default window size for 100 batches
+
     # Get gradient accumulation steps
     accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
 
@@ -319,9 +324,11 @@ def main():
         wandb.watch(model, log="all", log_freq=100)
 
     # Setup metrics
-    train_metrics = TextJEPAMetrics()
-    val_metrics = TextJEPAMetrics()
-
+    train_metrics = TextJEPAMetrics(
+        window_size=config["evaluation"]["metrics_window_size"], 
+        use_rolling=True
+    )
+    val_metrics = TextJEPAMetrics(use_rolling=False)  # Keep reset-based for evaluation
     # Load data
     logger.info("Loading C4 dataset...")
 

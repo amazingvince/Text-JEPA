@@ -313,37 +313,25 @@ class TextJEPA(nn.Module):
         """
         return self.context_encoder(tokens, attention_mask)
 
-
     @classmethod
     def from_config(cls, config):
         """
         Create a Text-JEPA model from a configuration dictionary.
-
-        Args:
-            config: Configuration dictionary with model settings
-
-        Returns:
-            model: Initialized Text-JEPA model
         """
-
         # Get model configuration
         model_config = config.get("model", {})
-
-        # Get training configuration
-        training_config = config.get("training", {})
-        ema_decay = training_config.get("ema_decay", 0.996)
 
         # Create context encoder, target encoder, and predictor
         context_encoder = ContextEncoder(model_config)
         target_encoder = TargetEncoder(model_config)
         predictor = Predictor(model_config)
 
-        # Create Text-JEPA model
+        # Create Text-JEPA model - pass config instead of ema_decay
         model = cls(
+            config=config,  # Pass the entire config object
             context_encoder=context_encoder,
             target_encoder=target_encoder,
             predictor=predictor,
-            ema_decay=ema_decay,
         )
 
         return model

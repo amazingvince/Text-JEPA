@@ -65,6 +65,9 @@ training:
   ema_decay: 0.99  # EMA decay for target encoder update
   scheduler: "linear_warmup_cosine_decay"  # Options: "linear_warmup_cosine_decay", "linear_warmup"
 
+evaluation:
+  metrics_window_size: 1  # Window size for rolling metrics (number of batches)
+
 tracking:
   use_wandb: True
   wandb_project: "text-jepa-modernbert"
