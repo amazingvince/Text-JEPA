@@ -65,6 +65,12 @@ Options:
 - `--subset`: C4 dataset subset (e.g., 'en', 'realnewslike')
 - `--streaming`: Enable streaming mode for the dataset
 - `--resume`: Path to checkpoint for resuming training
+- `--debug`: Add debug logging
+- `--experiment_name`: Name for the experiment, used in wandb and output directories
+- `--use_wandb`: Enable Weights & Biases logging
+- `--wandb_project`: Weights & Biases project name (default: "text-jepa")
+- `--wandb_entity`: Weights & Biases entity (username or team name)
+- `--wandb_tags`: Comma-separated list of tags for wandb
 
 ### Evaluation
 

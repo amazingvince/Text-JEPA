@@ -106,17 +106,32 @@ class C4TextJEPADataset(IterableDataset):
         else:
             dataset_iter = iter(self.dataset)
 
+        # Initialize an empty buffer
         buffer = []
-        buffer_size = self.buffer_size
 
-        # Fill the buffer
-        for _ in range(buffer_size):
+        # Track seen examples to avoid duplicates in the buffer
+        example_hashes = set()
+
+        # Fill the buffer initially
+        while len(buffer) < self.buffer_size:
             try:
                 example = next(dataset_iter)
-                buffer.append(example)
+
+                # Create a simple hash of the example to check for duplicates
+                # Using the first 100 chars should be enough to identify most duplicates
+                example_hash = hash(example["text"][:100])
+
+                # Only add if we haven't seen this example before
+                if example_hash not in example_hashes:
+                    buffer.append(example)
+                    example_hashes.add(example_hash)
+
             except StopIteration:
+                # If we can't fill the buffer, that's fine
+                logger.warning(f"Could only fill buffer with {len(buffer)} examples")
                 break
 
+        # Main iteration loop
         while buffer:
             # Randomly select an example from the buffer
             idx = random.randint(0, len(buffer) - 1)
@@ -125,14 +140,33 @@ class C4TextJEPADataset(IterableDataset):
             # Process the example
             processed = self._process_example(example)
 
+            if processed is not None:  # Only yield if processing was successful
+                yield processed
+
             # Replace the used example with a new one if available
             try:
-                buffer[idx] = next(dataset_iter)
+                new_example = next(dataset_iter)
+
+                # Check for duplicates before adding to buffer
+                example_hash = hash(new_example["text"][:100])
+                if example_hash not in example_hashes:
+                    buffer[idx] = new_example
+                    example_hashes.add(example_hash)
+                    # Remove the used example hash
+                    old_hash = hash(example["text"][:100])
+                    example_hashes.remove(old_hash)
+                else:
+                    # If duplicate, just remove the used example
+                    buffer.pop(idx)
+                    old_hash = hash(example["text"][:100])
+                    example_hashes.remove(old_hash)
+
             except StopIteration:
                 # Remove the used example if no more examples
                 buffer.pop(idx)
-
-            yield processed
+                old_hash = hash(example["text"][:100])
+                if old_hash in example_hashes:
+                    example_hashes.remove(old_hash)
 
     def _process_example(self, example: Dict) -> Dict:
         """
@@ -142,7 +176,7 @@ class C4TextJEPADataset(IterableDataset):
             example: Dataset example containing text
 
         Returns:
-            processed: Dictionary with processed inputs
+            processed: Dictionary with processed inputs or None if processing fails
         """
         text = example["text"]
 
@@ -161,15 +195,26 @@ class C4TextJEPADataset(IterableDataset):
         # Get actual sequence length (excluding padding)
         seq_length = attention_mask.sum().item()
 
+        # Skip very short sequences
+        if (
+            seq_length < self.min_span_length * 2 + 5
+        ):  # Need enough content for spans plus context
+            return None
+
         # Sample target spans
         target_spans = self._sample_spans(seq_length)
+
+        # Skip if we couldn't get valid spans
+        if all(start == 0 and end == 0 for start, end in target_spans):
+            return None
 
         # Create context tokens (with masked tokens where targets are)
         context_input_ids = input_ids.clone()
 
         # Mask out target spans in context
         for start_idx, end_idx in target_spans:
-            context_input_ids[start_idx:end_idx] = self.mask_token_id
+            if start_idx > 0 and end_idx > start_idx:  # Valid span
+                context_input_ids[start_idx:end_idx] = self.mask_token_id
 
         # Create target tokens
         target_input_ids = input_ids.clone()
@@ -195,7 +240,7 @@ class C4TextJEPADataset(IterableDataset):
         spans = []
 
         # Handle very short sequences
-        if seq_length <= self.min_span_length + 2:
+        if seq_length <= self.min_span_length * 2 + 2:
             # For extremely short sequences, just return a simple span
             spans.append((1, min(seq_length - 1, 1 + self.min_span_length)))
             # Pad with zeros if we need more spans
@@ -204,28 +249,24 @@ class C4TextJEPADataset(IterableDataset):
             return spans
 
         # Identify valid starting positions (leaving room for min span length)
-        valid_start_indices = list(range(1, seq_length - self.min_span_length))
+        valid_start_indices = list(range(1, seq_length - self.min_span_length - 1))
 
-        # Early exit if not enough valid positions
-        if not valid_start_indices:
-            # Return zero spans that will be ignored
-            return [(0, 0)] * self.num_spans
+        # Shuffle valid indices to increase randomness
+        random.shuffle(valid_start_indices)
 
         # Try to sample the requested number of spans
         for _ in range(min(self.num_spans, len(valid_start_indices))):
             if not valid_start_indices:
                 break
 
-            # Randomly select a starting position
-            start_idx = random.choice(valid_start_indices)
+            # Take the next available starting position from shuffled list
+            start_idx = valid_start_indices.pop(0)
 
             # Determine the maximum possible span length
             max_possible_length = min(self.max_span_length, seq_length - start_idx - 1)
 
             # Handle case where max_possible_length is too small
             if max_possible_length < self.min_span_length:
-                # Remove this starting position and try again
-                valid_start_indices.remove(start_idx)
                 continue
 
             # Sample the span length
@@ -244,9 +285,6 @@ class C4TextJEPADataset(IterableDataset):
                     for i in valid_start_indices
                     if i < start_idx - self.min_span_length or i >= end_idx
                 ]
-            else:
-                # Skip invalid span
-                valid_start_indices.remove(start_idx)
 
         # Pad with zeros if we couldn't sample enough spans
         while len(spans) < self.num_spans:

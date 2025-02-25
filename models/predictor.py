@@ -35,7 +35,9 @@ class PositionalEncoding(nn.Module):
         Returns:
             x: Input with positional encoding added
         """
-        x = x + self.pe[:, start_position : start_position + x.size(1)]
+        # Make sure we don't exceed the maximum length
+        start_pos = min(start_position, self.pe.size(1) - x.size(1))
+        x = x + self.pe[:, start_pos : start_pos + x.size(1)]
         return x
 
 
@@ -83,6 +85,13 @@ class Predictor(nn.Module):
             num_layers=num_layers,
         )
 
+        # Span position embedding
+        self.span_start_embedding = nn.Embedding(5000, hidden_size)
+        self.span_end_embedding = nn.Embedding(5000, hidden_size)
+
+        # Layer norm before final projection
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
         # Final projection layer
         self.projection = nn.Linear(hidden_size, hidden_size)
 
@@ -108,38 +117,60 @@ class Predictor(nn.Module):
         # Calculate span length
         span_len = end_pos - start_pos
 
-        # Handle edge cases
+        # Enhanced error handling for edge cases
         if span_len <= 0:
-            print(
-                f"Warning: Invalid span length {span_len} from positions {start_pos}-{end_pos}"
-            )
-            # Use a minimum span length of 1
-            span_len = max(1, span_len)
+            # Handle invalid span by creating a minimum span
+            span_len = 1
+            if end_pos <= 0:  # If both positions are invalid
+                start_pos = 1
+                end_pos = 2
+            else:
+                # Set start_pos one position before end_pos
+                start_pos = max(1, end_pos - 1)
 
         batch_size = context_repr.size(0)
         hidden_size = context_repr.size(2)
 
-        # Add positional encoding based on span position
+        # Add positional encoding based on sequence position
         context_repr = self.positional_encoding(context_repr, 0)
 
         # Pass through transformer layers
         transformer_output = self.transformer_encoder(context_repr)
 
-        # Create a mask token representation to predict the span
-        # This is a learnable embedding representing the mask
-        mask_tokens = torch.zeros(batch_size, span_len, hidden_size).to(
-            context_repr.device
+        # Get span start and end position embeddings
+        span_start_emb = self.span_start_embedding(
+            torch.tensor(start_pos, device=context_repr.device)
         )
-        mask_tokens = self.positional_encoding(mask_tokens, start_pos)
+        span_end_emb = self.span_end_embedding(
+            torch.tensor(end_pos, device=context_repr.device)
+        )
 
-        # Concatenate context output with mask tokens
-        concat_input = torch.cat([transformer_output, mask_tokens], dim=1)
+        # Create span token representations
+        span_tokens = torch.zeros(
+            batch_size, span_len, hidden_size, device=context_repr.device
+        )
 
-        # Pass through transformer again to contextualize with mask tokens
-        contextualized_output = self.transformer_encoder(concat_input)
+        # Add position-aware embeddings to each token in the span
+        for i in range(span_len):
+            pos_ratio = i / max(1, span_len - 1)  # Position ratio from 0 to 1
+            # Interpolate between start and end embeddings based on position
+            pos_emb = (1 - pos_ratio) * span_start_emb + pos_ratio * span_end_emb
+            span_tokens[:, i] = pos_emb
 
-        # Extract the predicted representations (corresponding to mask tokens)
-        predicted_repr = contextualized_output[:, -span_len:]
+        # Add base positional encoding
+        span_tokens = self.positional_encoding(span_tokens, start_pos)
+
+        # Concatenate context output with span tokens
+        concat_input = torch.cat([transformer_output, span_tokens], dim=1)
+
+        # Pass through transformer again to contextualize with span tokens
+        full_output = self.transformer_encoder(concat_input)
+
+        # Extract the predicted representations (corresponding to span tokens)
+        predicted_repr = full_output[:, -span_len:]
+
+        # Apply layer norm
+        predicted_repr = self.layer_norm(predicted_repr)
 
         # Project to final representation space
         predicted_repr = self.projection(predicted_repr)

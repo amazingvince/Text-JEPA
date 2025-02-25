@@ -8,6 +8,7 @@ import logging
 import numpy as np
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 from models.context_encoder import ContextEncoder
 from models.target_encoder import TargetEncoder
@@ -43,6 +44,36 @@ def parse_args():
         default=None,
         help="Path to checkpoint for resuming training",
     )
+    parser.add_argument(
+        "--debug", action="store_true", help="Enable debug mode with fewer samples"
+    )
+    parser.add_argument(
+        "--experiment_name",
+        type=str,
+        default=None,
+        help="Name for the experiment, used in wandb and outputs",
+    )
+    parser.add_argument(
+        "--use_wandb", action="store_true", help="Enable Weights & Biases logging"
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="text-jepa",
+        help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=None,
+        help="Weights & Biases entity (username or team name)",
+    )
+    parser.add_argument(
+        "--wandb_tags",
+        type=str,
+        default=None,
+        help="Comma-separated list of tags for wandb",
+    )
     return parser.parse_args()
 
 
@@ -63,20 +94,42 @@ def main():
     args = parse_args()
     config = load_config(args.config)
 
-    # Create output directories
-    os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
+    # Set up experiment name
+    if args.experiment_name is None:
+        timestamp = torch.cuda.current_device() if torch.cuda.is_available() else ""
+        args.experiment_name = f"text_jepa_{args.subset}_{timestamp}"
+
+    # Set up output directories with experiment name
+    experiment_output_dir = os.path.join(args.output_dir, args.experiment_name)
+    experiment_log_dir = os.path.join(args.log_dir, args.experiment_name)
+    os.makedirs(experiment_output_dir, exist_ok=True)
+    os.makedirs(experiment_log_dir, exist_ok=True)
 
     # Setup logging
-    logger = setup_logger("text_jepa", os.path.join(args.log_dir, "train.log"))
+    logger = setup_logger("text_jepa", os.path.join(experiment_log_dir, "train.log"))
+    logger.info(f"Experiment name: {args.experiment_name}")
     logger.info(f"Config: {config}")
     logger.info(f"Args: {args}")
 
     # Set random seed
     set_seed(args.seed)
 
+    # Initialize wandb if enabled
+    if args.use_wandb:
+        wandb_tags = args.wandb_tags.split(",") if args.wandb_tags else []
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.experiment_name,
+            config={**config, **vars(args)},
+            tags=wandb_tags,
+        )
+        logger.info(
+            f"Weights & Biases initialized with project: {args.wandb_project}, name: {args.experiment_name}"
+        )
+
     # Setup tensorboard
-    writer = SummaryWriter(log_dir=args.log_dir)
+    writer = SummaryWriter(log_dir=experiment_log_dir)
 
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -116,6 +169,12 @@ def main():
     )
 
     model = model.to(device)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Model created with {total_params:,} trainable parameters")
+
+    # Log model architecture to wandb if enabled
+    if args.use_wandb:
+        wandb.watch(model, log="all", log_freq=100)
 
     # Setup metrics
     train_metrics = TextJEPAMetrics()
@@ -123,6 +182,13 @@ def main():
 
     # Load data
     logger.info("Loading C4 dataset...")
+
+    # Use a larger buffer size for streaming
+    buffer_size = config["data"]["buffer_size"]
+    if args.streaming:
+        buffer_size = max(
+            buffer_size, 50000
+        )  # Use at least 50k examples in buffer for streaming
 
     train_dataloader = create_c4_dataloader(
         split="train",
@@ -136,7 +202,7 @@ def main():
         min_text_length=config["data"]["min_text_length"],
         seed=args.seed,
         streaming=args.streaming,
-        buffer_size=config["data"]["buffer_size"],
+        buffer_size=buffer_size,
         num_workers=config["data"]["num_workers"],
     )
 
@@ -152,7 +218,7 @@ def main():
         min_text_length=config["data"]["min_text_length"],
         seed=args.seed,
         streaming=args.streaming,
-        buffer_size=config["data"]["buffer_size"],
+        buffer_size=buffer_size,
         num_workers=config["data"]["num_workers"],
     )
 
@@ -212,6 +278,14 @@ def main():
     epoch = start_epoch
     early_stop = False
 
+    # Adjust for debug mode
+    if args.debug:
+        logger.info("DEBUG MODE ENABLED: Using fewer steps")
+        max_steps = min(max_steps, 100)
+        eval_steps = min(eval_steps, 20)
+        save_steps = min(save_steps, 50)
+        config["training"]["eval_samples"] = min(config["training"]["eval_samples"], 64)
+
     # Main training loop - runs until max_steps reached
     while global_step < max_steps and not early_stop:
         # Reset train metrics for this epoch
@@ -220,13 +294,17 @@ def main():
         # Training
         model.train()
 
+        # In streaming mode, we don't have an epoch concept, so we
+        # just process batches until the next evaluation point
+        steps_in_epoch = min(
+            eval_steps,
+            len(train_dataloader) if not args.streaming else float("inf"),
+        )
+
         train_progress_bar = tqdm(
             enumerate(train_dataloader),
             desc=f"Epoch {epoch+1} [Train]",
-            total=min(
-                eval_steps,
-                len(train_dataloader) if not args.streaming else float("inf"),
-            ),
+            total=steps_in_epoch,
         )
 
         # Process batches until evaluation or end of epoch
@@ -251,7 +329,7 @@ def main():
                 optimizer.zero_grad()
                 loss.backward()
 
-                # grad_norm
+                # Calculate gradient norm for monitoring
                 total_norm = 0
                 for p in model.parameters():
                     if p.grad is not None:
@@ -259,6 +337,9 @@ def main():
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm**0.5
                 writer.add_scalar("train/grad_norm", total_norm, global_step)
+
+                if args.use_wandb:
+                    wandb.log({"train/grad_norm": total_norm}, step=global_step)
 
                 # Clip gradients
                 torch.nn.utils.clip_grad_norm_(
@@ -274,7 +355,7 @@ def main():
                 # Skip this batch but continue training
                 continue
 
-            # Update parameters (only once!)
+            # Update parameters
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
@@ -283,7 +364,7 @@ def main():
             train_metrics.update(
                 batch_metrics["predicted_reprs"],
                 batch_metrics["target_reprs"],
-                {  # Add this new parameter with non-matching similarity metrics
+                {
                     "avg_nonmatching_pred_similarity": batch_metrics[
                         "avg_nonmatching_pred_similarity"
                     ],
@@ -313,15 +394,9 @@ def main():
             metrics_dict = train_metrics.compute()
             train_progress_bar.set_postfix(
                 {
-                    "loss": loss.item(),
-                    "cosine_sim": metrics_dict["cosine_similarity"],
-                    "avg_pred_sim": metrics_dict[
-                        "avg_nonmatching_pred_similarity"
-                    ],  # Add this
-                    "avg_target_sim": metrics_dict[
-                        "avg_nonmatching_target_similarity"
-                    ],  # Add this
-                    "lr": optimizer.param_groups[0]["lr"],
+                    "loss": f"{loss.item():.4f}",
+                    "cos_sim": f"{metrics_dict['cosine_similarity']:.4f}",
+                    "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
                     "step": global_step,
                 }
             )
@@ -333,20 +408,9 @@ def main():
                 metrics_dict["cosine_similarity"],
                 global_step,
             )
-            # Add these new metrics to tensorboard
             writer.add_scalar(
                 "train/avg_nonmatching_pred_similarity",
                 metrics_dict["avg_nonmatching_pred_similarity"],
-                global_step,
-            )
-            writer.add_scalar(
-                "train/max_nonmatching_pred_similarity",
-                metrics_dict["max_nonmatching_pred_similarity"],
-                global_step,
-            )
-            writer.add_scalar(
-                "train/min_nonmatching_pred_similarity",
-                metrics_dict["min_nonmatching_pred_similarity"],
                 global_step,
             )
             writer.add_scalar(
@@ -354,22 +418,31 @@ def main():
                 metrics_dict["avg_nonmatching_target_similarity"],
                 global_step,
             )
-            writer.add_scalar(
-                "train/max_nonmatching_target_similarity",
-                metrics_dict["max_nonmatching_target_similarity"],
-                global_step,
-            )
-            writer.add_scalar(
-                "train/min_nonmatching_target_similarity",
-                metrics_dict["min_nonmatching_target_similarity"],
-                global_step,
-            )
             writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
+
+            # Log to wandb if enabled
+            if args.use_wandb:
+                wandb.log(
+                    {
+                        "train/loss": loss.item(),
+                        "train/cosine_similarity": metrics_dict["cosine_similarity"],
+                        "train/avg_nonmatching_pred_similarity": metrics_dict[
+                            "avg_nonmatching_pred_similarity"
+                        ],
+                        "train/avg_nonmatching_target_similarity": metrics_dict[
+                            "avg_nonmatching_target_similarity"
+                        ],
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                        "epoch": epoch,
+                        "global_step": global_step,
+                    },
+                    step=global_step,
+                )
 
             # Save checkpoint at regular intervals
             if global_step % save_steps == 0:
                 checkpoint_path = os.path.join(
-                    args.output_dir, f"checkpoint-{global_step}.pt"
+                    experiment_output_dir, f"checkpoint-{global_step}.pt"
                 )
                 torch.save(
                     {
@@ -395,7 +468,7 @@ def main():
                 break
 
             # Check if it's time for evaluation
-            if global_step % eval_steps == 0:
+            if steps_since_eval >= eval_steps:
                 break
 
         # Evaluation
@@ -404,17 +477,18 @@ def main():
             model.eval()
             val_metrics.reset()
 
+            # Calculate how many batches to evaluate
+            eval_batches = (
+                config["training"]["eval_samples"] // config["training"]["batch_size"]
+            )
+
             val_progress_bar = tqdm(
                 enumerate(val_dataloader),
                 desc=f"Epoch {epoch+1} [Val]",
-                total=min(
-                    config["training"]["eval_samples"]
-                    // config["training"]["batch_size"],
-                    len(val_dataloader) if not args.streaming else float("inf"),
-                ),
+                total=eval_batches,
             )
 
-            eval_steps_done = 0
+            total_val_samples = 0
             with torch.no_grad():
                 for val_step_idx, batch in val_progress_bar:
                     # Move batch to device
@@ -435,7 +509,7 @@ def main():
                     val_metrics.update(
                         batch_metrics["predicted_reprs"],
                         batch_metrics["target_reprs"],
-                        {  # Add this new parameter with non-matching similarity metrics
+                        {
                             "avg_nonmatching_pred_similarity": batch_metrics[
                                 "avg_nonmatching_pred_similarity"
                             ],
@@ -457,68 +531,62 @@ def main():
                         },
                     )
 
-                    # Update progress bar
+                    # Increment sample count and update progress bar
+                    total_val_samples += context_input_ids.size(0)
                     metrics_dict = val_metrics.compute()
+
                     val_progress_bar.set_postfix(
                         {
-                            "loss": loss.item(),
-                            "cosine_sim": metrics_dict["cosine_similarity"],
-                            "avg_pred_sim": metrics_dict[
-                                "avg_nonmatching_pred_similarity"
-                            ],  # Add this
-                            "avg_target_sim": metrics_dict[
-                                "avg_nonmatching_target_similarity"
-                            ],  # Add this
+                            "loss": f"{loss.item():.4f}",
+                            "cos_sim": f"{metrics_dict['cosine_similarity']:.4f}",
+                            "samples": total_val_samples,
                         }
                     )
 
-                    # Compute validation metrics
-                    val_metrics_dict = val_metrics.compute()
-                    val_loss = val_metrics_dict["l2_loss"]
-                    val_cosine_sim = val_metrics_dict["cosine_similarity"]
+                    # Break after evaluating enough samples
+                    if total_val_samples >= config["training"]["eval_samples"]:
+                        break
 
-                    # Log validation metrics
-                    logger.info(
-                        f"Validation at step {global_step} - Loss: {val_loss:.4f}, "
-                        f"Cosine Similarity: {val_cosine_sim:.4f}, "
-                        f"Avg Pred Similarity: {val_metrics_dict['avg_nonmatching_pred_similarity']:.4f}, "
-                        f"Avg Target Similarity: {val_metrics_dict['avg_nonmatching_target_similarity']:.4f}"
-                    )
+                # Compute validation metrics once at the end
+                val_metrics_dict = val_metrics.compute()
+                val_loss = val_metrics_dict["l2_loss"]
+                val_cosine_sim = val_metrics_dict["cosine_similarity"]
 
-                    writer.add_scalar("val/loss", val_loss, global_step)
-                    writer.add_scalar(
-                        "val/cosine_similarity", val_cosine_sim, global_step
-                    )
-                    # Add these new metrics to tensorboard for validation
-                    writer.add_scalar(
-                        "val/avg_nonmatching_pred_similarity",
-                        val_metrics_dict["avg_nonmatching_pred_similarity"],
-                        global_step,
-                    )
-                    writer.add_scalar(
-                        "val/max_nonmatching_pred_similarity",
-                        val_metrics_dict["max_nonmatching_pred_similarity"],
-                        global_step,
-                    )
-                    writer.add_scalar(
-                        "val/min_nonmatching_pred_similarity",
-                        val_metrics_dict["min_nonmatching_pred_similarity"],
-                        global_step,
-                    )
-                    writer.add_scalar(
-                        "val/avg_nonmatching_target_similarity",
-                        val_metrics_dict["avg_nonmatching_target_similarity"],
-                        global_step,
-                    )
-                    writer.add_scalar(
-                        "val/max_nonmatching_target_similarity",
-                        val_metrics_dict["max_nonmatching_target_similarity"],
-                        global_step,
-                    )
-                    writer.add_scalar(
-                        "val/min_nonmatching_target_similarity",
-                        val_metrics_dict["min_nonmatching_target_similarity"],
-                        global_step,
+                # Log validation metrics
+                logger.info(
+                    f"Validation at step {global_step} - Loss: {val_loss:.4f}, "
+                    f"Cosine Similarity: {val_cosine_sim:.4f}, "
+                    f"Avg Pred Similarity: {val_metrics_dict['avg_nonmatching_pred_similarity']:.4f}, "
+                    f"Avg Target Similarity: {val_metrics_dict['avg_nonmatching_target_similarity']:.4f}"
+                )
+
+                writer.add_scalar("val/loss", val_loss, global_step)
+                writer.add_scalar("val/cosine_similarity", val_cosine_sim, global_step)
+                writer.add_scalar(
+                    "val/avg_nonmatching_pred_similarity",
+                    val_metrics_dict["avg_nonmatching_pred_similarity"],
+                    global_step,
+                )
+                writer.add_scalar(
+                    "val/avg_nonmatching_target_similarity",
+                    val_metrics_dict["avg_nonmatching_target_similarity"],
+                    global_step,
+                )
+
+                # Log to wandb if enabled
+                if args.use_wandb:
+                    wandb.log(
+                        {
+                            "val/loss": val_loss,
+                            "val/cosine_similarity": val_cosine_sim,
+                            "val/avg_nonmatching_pred_similarity": val_metrics_dict[
+                                "avg_nonmatching_pred_similarity"
+                            ],
+                            "val/avg_nonmatching_target_similarity": val_metrics_dict[
+                                "avg_nonmatching_target_similarity"
+                            ],
+                        },
+                        step=global_step,
                     )
 
             # Save checkpoint if validation loss improves
@@ -526,7 +594,7 @@ def main():
                 best_val_loss = val_loss
 
                 # Save model checkpoint
-                checkpoint_path = os.path.join(args.output_dir, "best_model.pt")
+                checkpoint_path = os.path.join(experiment_output_dir, "best_model.pt")
                 torch.save(
                     {
                         "epoch": epoch,
@@ -547,11 +615,15 @@ def main():
                     f"New best model saved at {checkpoint_path} with validation loss: {best_val_loss:.4f}"
                 )
 
+                if args.use_wandb:
+                    wandb.run.summary["best_val_loss"] = best_val_loss
+                    wandb.run.summary["best_val_step"] = global_step
+
         # Move to next epoch
         epoch += 1
 
     # Save final model
-    final_checkpoint_path = os.path.join(args.output_dir, "final_model.pt")
+    final_checkpoint_path = os.path.join(experiment_output_dir, "final_model.pt")
     torch.save(
         {
             "epoch": epoch,
@@ -574,6 +646,13 @@ def main():
 
     # Close tensorboard writer
     writer.close()
+
+    # Finish wandb run if enabled
+    if args.use_wandb:
+        wandb.run.summary["final_val_loss"] = best_val_loss
+        wandb.run.summary["total_steps"] = global_step
+        wandb.run.summary["total_epochs"] = epoch
+        wandb.finish()
 
 
 if __name__ == "__main__":

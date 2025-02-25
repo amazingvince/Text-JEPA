@@ -29,9 +29,16 @@ training:
   eval_steps: 1000
   eval_samples: 1000
   save_steps: 5000
-  learning_rate: 5.0e-5
+  learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 10000
   max_grad_norm: 1.0
-  ema_decay: 0.996  # EMA decay for target encoder update
+  ema_decay: 0.99  # EMA decay for target encoder update
   scheduler: "linear_warmup_cosine_decay"  # Options: "linear_warmup_cosine_decay", "linear_warmup"
+
+tracking:
+  use_wandb: True
+  wandb_project: "text-jepa"
+  wandb_entity: "amazingvince"  # Set to your username or team name
+  experiment_name: "debug test run"  # Will use auto-generated name if null
+  wandb_tags: "text-jepa,nlp,self-supervised"  # Comma-separated tags
