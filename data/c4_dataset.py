@@ -21,16 +21,10 @@ class C4TextJEPADataset(IterableDataset):
         self,
         split: str = "train",
         subset: str = "en",
-        tokenizer_name_or_path: str = "roberta-base",
-        max_length: int = 512,
-        num_spans: int = 2,
-        min_span_length: int = 5,
-        max_span_length: int = 20,
-        min_text_length: int = 200,
+        tokenizer_config: Dict = None,
+        data_config: Dict = None,
         seed: int = 42,
         streaming: bool = True,
-        buffer_size: int = 10000,
-        num_proc: int = 4,
     ):
         """
         Initialize the C4 TextJEPA dataset.
@@ -38,25 +32,30 @@ class C4TextJEPADataset(IterableDataset):
         Args:
             split: Dataset split ('train', 'validation', 'test')
             subset: Language subset ('en', 'realnewslike', etc.)
-            tokenizer_name_or_path: Tokenizer name or path
-            max_length: Maximum sequence length
-            num_spans: Number of spans to select as targets
-            min_span_length: Minimum span length (in tokens)
-            max_span_length: Maximum span length (in tokens)
-            min_text_length: Minimum text length to consider
+            tokenizer_config: Configuration for the tokenizer
+            data_config: Configuration for data processing
             seed: Random seed
             streaming: Whether to stream the dataset (for large datasets)
-            buffer_size: Buffer size for streaming
-            num_proc: Number of processes for preprocessing
         """
         self.split = split
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-        self.max_length = max_length
-        self.num_spans = num_spans
-        self.min_span_length = min_span_length
-        self.max_span_length = max_span_length
-        self.min_text_length = min_text_length
-        self.buffer_size = buffer_size
+
+        # Get tokenizer config
+        if tokenizer_config is None:
+            tokenizer_config = {}
+
+        tokenizer_name = tokenizer_config.get("name_or_path", "roberta-base")
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        # Get data config
+        if data_config is None:
+            data_config = {}
+
+        self.max_length = data_config.get("max_length", 512)
+        self.num_spans = data_config.get("num_spans", 2)
+        self.min_span_length = data_config.get("min_span_length", 5)
+        self.max_span_length = data_config.get("max_span_length", 20)
+        self.min_text_length = data_config.get("min_text_length", 200)
+        self.buffer_size = data_config.get("buffer_size", 10000)
 
         # Special tokens
         self.cls_token_id = self.tokenizer.cls_token_id
@@ -79,7 +78,7 @@ class C4TextJEPADataset(IterableDataset):
 
         # Apply filter for minimum text length
         self.dataset = self.dataset.filter(
-            lambda example: len(example["text"]) >= min_text_length
+            lambda example: len(example["text"]) >= self.min_text_length
         )
 
         logger.info(f"C4 dataset loaded and filtered.")
@@ -294,53 +293,38 @@ class C4TextJEPADataset(IterableDataset):
 
 
 def create_c4_dataloader(
+    config: Dict,
     split="train",
     subset="en",
-    batch_size=32,
-    tokenizer_name_or_path="roberta-base",
-    max_length=512,
-    num_spans=2,
-    min_span_length=5,
-    max_span_length=20,
-    min_text_length=200,
     seed=42,
     streaming=True,
-    buffer_size=10000,
-    num_workers=4,
 ):
     """
     Create a dataloader for the C4 dataset.
 
     Args:
+        config: Configuration dictionary with model, data, tokenizer settings
         split: Dataset split ('train', 'validation', 'test')
         subset: Language subset ('en', 'realnewslike', etc.)
-        batch_size: Batch size
-        tokenizer_name_or_path: Tokenizer name or path
-        max_length: Maximum sequence length
-        num_spans: Number of spans to select as targets
-        min_span_length: Minimum span length (in tokens)
-        max_span_length: Maximum span length (in tokens)
-        min_text_length: Minimum text length to consider
         seed: Random seed
         streaming: Whether to stream the dataset
-        buffer_size: Buffer size for streaming
-        num_workers: Number of worker processes
 
     Returns:
         dataloader: PyTorch DataLoader
     """
+    # Extract configuration
+    tokenizer_config = config.get("tokenizer", {})
+    data_config = config.get("data", {})
+    batch_size = config.get("training", {}).get("batch_size", 16)
+    num_workers = data_config.get("num_workers", 4)
+
     dataset = C4TextJEPADataset(
         split=split,
         subset=subset,
-        tokenizer_name_or_path=tokenizer_name_or_path,
-        max_length=max_length,
-        num_spans=num_spans,
-        min_span_length=min_span_length,
-        max_span_length=max_span_length,
-        min_text_length=min_text_length,
+        tokenizer_config=tokenizer_config,
+        data_config=data_config,
         seed=seed,
         streaming=streaming,
-        buffer_size=buffer_size,
     )
 
     dataloader = DataLoader(

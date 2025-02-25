@@ -10,9 +10,6 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import wandb
 
-from models.context_encoder import ContextEncoder
-from models.target_encoder import TargetEncoder
-from models.predictor import Predictor
 from models.text_jepa import TextJEPA
 from data.c4_dataset import create_c4_dataloader
 from utils.logger import setup_logger
@@ -74,6 +71,14 @@ def parse_args():
         default=None,
         help="Comma-separated list of tags for wandb",
     )
+    # Add model initialization method override
+    parser.add_argument(
+        "--model_init_method",
+        type=str,
+        choices=["pretrained", "from_config", "auto"],
+        default=None,
+        help="Override model initialization method from config",
+    )
     return parser.parse_args()
 
 
@@ -111,6 +116,15 @@ def main():
     logger.info(f"Config: {config}")
     logger.info(f"Args: {args}")
 
+    # Apply model initialization method override if specified
+    if args.model_init_method is not None:
+        if "model" not in config:
+            config["model"] = {}
+        config["model"]["initialization_method"] = args.model_init_method
+        logger.info(
+            f"Overriding model initialization method to: {args.model_init_method}"
+        )
+
     # Set random seed
     set_seed(args.seed)
 
@@ -135,40 +149,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    # Create model components
-    logger.info("Creating model components...")
-    context_encoder = ContextEncoder(
-        model_name_or_path=config["model"]["name_or_path"],
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["context_encoder_layers"],
-        use_custom_model=config["model"]["use_custom_model"],
-        dropout_prob=config["model"]["dropout_prob"],
-    )
-
-    target_encoder = TargetEncoder(
-        model_name_or_path=config["model"]["name_or_path"],
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["target_encoder_layers"],
-        use_custom_model=config["model"]["use_custom_model"],
-        dropout_prob=config["model"]["dropout_prob"],
-    )
-
-    predictor = Predictor(
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["predictor_layers"],
-        num_heads=config["model"]["num_heads"],
-        dropout_prob=config["model"]["dropout_prob"],
-    )
-
-    # Create Text-JEPA model
-    model = TextJEPA(
-        context_encoder=context_encoder,
-        target_encoder=target_encoder,
-        predictor=predictor,
-        ema_decay=config["training"]["ema_decay"],
-    )
-
+    # Create model from config
+    logger.info("Creating model from config...")
+    model = TextJEPA.from_config(config)
     model = model.to(device)
+
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model created with {total_params:,} trainable parameters")
 
@@ -190,36 +175,25 @@ def main():
             buffer_size, 50000
         )  # Use at least 50k examples in buffer for streaming
 
+    # Update config with buffer size
+    data_config = config.get("data", {})
+    data_config["buffer_size"] = buffer_size
+    config["data"] = data_config
+
     train_dataloader = create_c4_dataloader(
+        config=config,
         split="train",
         subset=args.subset,
-        batch_size=config["training"]["batch_size"],
-        tokenizer_name_or_path=config["model"]["name_or_path"],
-        max_length=config["data"]["max_length"],
-        num_spans=config["data"]["num_spans"],
-        min_span_length=config["data"]["min_span_length"],
-        max_span_length=config["data"]["max_span_length"],
-        min_text_length=config["data"]["min_text_length"],
         seed=args.seed,
         streaming=args.streaming,
-        buffer_size=buffer_size,
-        num_workers=config["data"]["num_workers"],
     )
 
     val_dataloader = create_c4_dataloader(
+        config=config,
         split="validation",
         subset=args.subset,
-        batch_size=config["training"]["batch_size"],
-        tokenizer_name_or_path=config["model"]["name_or_path"],
-        max_length=config["data"]["max_length"],
-        num_spans=config["data"]["num_spans"],
-        min_span_length=config["data"]["min_span_length"],
-        max_span_length=config["data"]["max_span_length"],
-        min_text_length=config["data"]["min_text_length"],
         seed=args.seed,
         streaming=args.streaming,
-        buffer_size=buffer_size,
-        num_workers=config["data"]["num_workers"],
     )
 
     # Setup optimizer

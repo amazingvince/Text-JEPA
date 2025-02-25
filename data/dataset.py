@@ -15,32 +15,35 @@ class TextJEPADataset(Dataset):
     def __init__(
         self,
         texts,
-        tokenizer_name_or_path="roberta-base",
-        max_length=512,
-        num_spans=2,
-        min_span_length=5,
-        max_span_length=20,
-        context_mask_ratio=0.5,
+        tokenizer_config=None,
+        data_config=None,
     ):
         """
         Initialize the TextJEPA dataset.
 
         Args:
             texts: List of text samples
-            tokenizer_name_or_path: Tokenizer name or path
-            max_length: Maximum sequence length
-            num_spans: Number of spans to select as targets
-            min_span_length: Minimum span length (in tokens)
-            max_span_length: Maximum span length (in tokens)
-            context_mask_ratio: Ratio of tokens to mask in the context
+            tokenizer_config: Configuration for the tokenizer
+            data_config: Configuration for data processing
         """
         self.texts = texts
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-        self.max_length = max_length
-        self.num_spans = num_spans
-        self.min_span_length = min_span_length
-        self.max_span_length = max_span_length
-        self.context_mask_ratio = context_mask_ratio
+
+        # Get tokenizer config
+        if tokenizer_config is None:
+            tokenizer_config = {}
+
+        tokenizer_name = tokenizer_config.get("name_or_path", "roberta-base")
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+        # Get data config
+        if data_config is None:
+            data_config = {}
+
+        self.max_length = data_config.get("max_length", 512)
+        self.num_spans = data_config.get("num_spans", 2)
+        self.min_span_length = data_config.get("min_span_length", 5)
+        self.max_span_length = data_config.get("max_span_length", 20)
+        self.context_mask_ratio = data_config.get("context_mask_ratio", 0.5)
 
         # Special tokens
         self.cls_token_id = self.tokenizer.cls_token_id
@@ -146,33 +149,30 @@ class TextJEPADataset(Dataset):
 
 def create_dataloader(
     texts,
-    batch_size=32,
-    tokenizer_name_or_path="roberta-base",
-    max_length=512,
-    num_spans=2,
+    config,
     shuffle=True,
-    num_workers=4,
 ):
     """
     Create a dataloader for Text-JEPA.
 
     Args:
         texts: List of text samples
-        batch_size: Batch size
-        tokenizer_name_or_path: Tokenizer name or path
-        max_length: Maximum sequence length
-        num_spans: Number of spans to select as targets
+        config: Configuration dictionary with model, data, tokenizer settings
         shuffle: Whether to shuffle the data
-        num_workers: Number of worker processes
 
     Returns:
         dataloader: PyTorch DataLoader
     """
+    # Extract configuration
+    tokenizer_config = config.get("tokenizer", {})
+    data_config = config.get("data", {})
+    batch_size = config.get("training", {}).get("batch_size", 16)
+    num_workers = data_config.get("num_workers", 4)
+
     dataset = TextJEPADataset(
         texts=texts,
-        tokenizer_name_or_path=tokenizer_name_or_path,
-        max_length=max_length,
-        num_spans=num_spans,
+        tokenizer_config=tokenizer_config,
+        data_config=data_config,
     )
 
     dataloader = torch.utils.data.DataLoader(

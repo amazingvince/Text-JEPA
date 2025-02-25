@@ -51,21 +51,36 @@ class Predictor(nn.Module):
 
     def __init__(
         self,
-        hidden_size=768,
-        num_layers=6,
-        num_heads=12,
-        dropout_prob=0.1,
+        model_config=None,
     ):
         """
         Initialize the Predictor.
 
         Args:
-            hidden_size: Hidden dimension size
-            num_layers: Number of transformer layers
-            num_heads: Number of attention heads
-            dropout_prob: Dropout probability
+            model_config: Model configuration dictionary
         """
         super().__init__()
+
+        # Default configuration if none provided
+        if model_config is None:
+            model_config = {}
+
+        # Extract configuration values with type conversion
+        hidden_size = int(model_config.get("hidden_size", 768))
+        num_layers = int(model_config.get("predictor_layers", 6))
+        num_heads = int(model_config.get("num_heads", 12))
+        dropout_prob = float(model_config.get("dropout_prob", 0.1))
+        activation_function = model_config.get("activation_function", "gelu")
+
+        # Use a very small default layer_norm_eps if norm_eps is not provided
+        # Convert explicitly to float to avoid any string conversion issues
+        layer_norm_eps = float(model_config.get("norm_eps", 1e-5))
+
+        # Log the values for debugging
+        print(
+            f"Predictor parameters: hidden_size={hidden_size}, num_layers={num_layers}, "
+            f"num_heads={num_heads}, dropout_prob={dropout_prob}, layer_norm_eps={layer_norm_eps}"
+        )
 
         # Positional encoding for span position information
         self.positional_encoding = PositionalEncoding(hidden_size)
@@ -76,8 +91,10 @@ class Predictor(nn.Module):
             nhead=num_heads,
             dim_feedforward=hidden_size * 4,
             dropout=dropout_prob,
-            activation="gelu",
+            activation=activation_function,
             batch_first=True,
+            norm_first=False,  # Use post-layer normalization for better stability
+            layer_norm_eps=layer_norm_eps,  # Explicitly pass the float value
         )
 
         self.transformer_encoder = nn.TransformerEncoder(
@@ -90,7 +107,9 @@ class Predictor(nn.Module):
         self.span_end_embedding = nn.Embedding(5000, hidden_size)
 
         # Layer norm before final projection
-        self.layer_norm = nn.LayerNorm(hidden_size)
+        self.layer_norm = nn.LayerNorm(
+            hidden_size, eps=layer_norm_eps
+        )  # Explicitly pass the float value
 
         # Final projection layer
         self.projection = nn.Linear(hidden_size, hidden_size)

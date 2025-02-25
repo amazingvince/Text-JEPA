@@ -1,44 +1,71 @@
-# Default configuration for Text-JEPA with C4 dataset
+# Configuration for Text-JEPA with ModernBERT
+
+# Tokenizer configuration
+tokenizer:
+  name_or_path: "answerdotai/ModernBERT-base"  # Path to the ModernBERT model/tokenizer
+  max_length: 1024
+  add_special_tokens: true
+  padding: "max_length"
+  truncation: true
+  return_tensors: "pt"
 
 # Model configuration
 model:
-  name_or_path: "roberta-base"
+  name_or_path: "answerdotai/ModernBERT-base"
+  # Initialization method options:
+  # - "pretrained": Load pretrained weights from the Hub (default)
+  # - "from_config": Initialize from configuration only (random weights)
+  # - "auto": Try pretrained first, fall back to config if needed
+  initialization_method: "from_config"  # Change this to control initialization
+  
+  # Architecture parameters
+  # If using "pretrained", these will be loaded from the model
+  # If using "from_config", these will be used to create the model
   hidden_size: 768
-  context_encoder_layers: 12
-  target_encoder_layers: 12
+  context_encoder_layers: 22       # num_hidden_layers from ModernBERT config
+  target_encoder_layers: 22        # num_hidden_layers from ModernBERT config
   predictor_layers: 6
-  num_heads: 12
-  dropout_prob: 0.1
+  num_heads: 12                    # num_attention_heads from ModernBERT config
+  dropout_prob: 0.0                # attention_dropout from ModernBERT config
   use_custom_model: false
+  # Additional ModernBERT-specific parameters
+  activation_function: "gelu"      # hidden_activation from ModernBERT config
+  attention_probs_dropout_prob: 0.0
+  position_embedding_type: "absolute"
+  intermediate_size: 1152
+  max_position_embeddings: 8192
+  local_attention: 128
+  global_attn_every_n_layers: 3
+  norm_eps:  0.00001
 
 # Data configuration
 data:
-  max_length: 512
+  max_length: 1024
   num_spans: 2
-  min_span_length: 5
-  max_span_length: 20
-  min_text_length: 200
+  min_span_length: 20
+  max_span_length: 60
+  min_text_length: 500
   context_mask_ratio: 0.5
   num_workers: 4
-  buffer_size: 10000
+  buffer_size: 100000
 
 # Training configuration
 training:
-  batch_size: 16
+  batch_size: 8
   max_steps: 100000
   eval_steps: 1000
   eval_samples: 1000
   save_steps: 5000
-  learning_rate: 1.0e-5
+  learning_rate: 2.0e-6
   weight_decay: 0.01
-  warmup_steps: 10000
+  warmup_steps: 1000
   max_grad_norm: 1.0
-  ema_decay: 0.99  # EMA decay for target encoder update
+  ema_decay: 0.996  # EMA decay for target encoder update
   scheduler: "linear_warmup_cosine_decay"  # Options: "linear_warmup_cosine_decay", "linear_warmup"
 
 tracking:
   use_wandb: True
-  wandb_project: "text-jepa"
+  wandb_project: "text-jepa-modernbert"
   wandb_entity: "amazingvince"  # Set to your username or team name
-  experiment_name: "debug test run"  # Will use auto-generated name if null
-  wandb_tags: "text-jepa,nlp,self-supervised"  # Comma-separated tags
+  experiment_name: "modernbert-jepa-run"  # Will use auto-generated name if null
+  wandb_tags: "text-jepa,nlp,self-supervised,modernbert"  # Comma-separated tags

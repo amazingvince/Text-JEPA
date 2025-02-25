@@ -7,9 +7,6 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from models.context_encoder import ContextEncoder
-from models.target_encoder import TargetEncoder
-from models.predictor import Predictor
 from models.text_jepa import TextJEPA
 from data.c4_dataset import create_c4_dataloader
 from utils.logger import setup_logger
@@ -80,38 +77,9 @@ def main():
 
     logger.info(f"Model config: {config}")
 
-    # Create model components
-    logger.info("Creating model components...")
-    context_encoder = ContextEncoder(
-        model_name_or_path=config["model"]["name_or_path"],
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["context_encoder_layers"],
-        use_custom_model=config["model"]["use_custom_model"],
-        dropout_prob=config["model"]["dropout_prob"],
-    )
-
-    target_encoder = TargetEncoder(
-        model_name_or_path=config["model"]["name_or_path"],
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["target_encoder_layers"],
-        use_custom_model=config["model"]["use_custom_model"],
-        dropout_prob=config["model"]["dropout_prob"],
-    )
-
-    predictor = Predictor(
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["predictor_layers"],
-        num_heads=config["model"]["num_heads"],
-        dropout_prob=config["model"]["dropout_prob"],
-    )
-
-    # Create Text-JEPA model
-    model = TextJEPA(
-        context_encoder=context_encoder,
-        target_encoder=target_encoder,
-        predictor=predictor,
-        ema_decay=config["training"]["ema_decay"],
-    )
+    # Create model from config
+    logger.info("Creating model from config...")
+    model = TextJEPA.from_config(config)
 
     # Load weights from checkpoint
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -128,20 +96,16 @@ def main():
     # Load evaluation data
     logger.info(f"Loading C4 dataset ({args.split} split, {args.subset} subset)...")
 
+    # Override batch size if specified in args
+    if args.batch_size:
+        config["training"]["batch_size"] = args.batch_size
+
     eval_dataloader = create_c4_dataloader(
+        config=config,
         split=args.split,
         subset=args.subset,
-        batch_size=args.batch_size,
-        tokenizer_name_or_path=config["model"]["name_or_path"],
-        max_length=config["data"]["max_length"],
-        num_spans=config["data"]["num_spans"],
-        min_span_length=config["data"]["min_span_length"],
-        max_span_length=config["data"]["max_span_length"],
-        min_text_length=config["data"]["min_text_length"],
         seed=args.seed,
         streaming=args.streaming,
-        buffer_size=config["data"]["buffer_size"],
-        num_workers=config["data"]["num_workers"],
     )
 
     # Evaluation loop
