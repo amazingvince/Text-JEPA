@@ -62,6 +62,69 @@ class TextJEPA(nn.Module):
                 1.0 - self.ema_decay
             )
 
+    @torch.no_grad()
+    def _calculate_batch_pairwise_similarity(self, batch_embeddings):
+        """
+        Calculate pairwise cosine similarity between different embeddings in a batch.
+
+        Args:
+            batch_embeddings: Tensor of shape [batch_size, embedding_dim]
+                            or list of tensors each of shape [embedding_dim]
+
+        Returns:
+            tuple: (avg_similarity, max_similarity, min_similarity) between non-matching pairs
+        """
+        # Convert list of tensors to single tensor if needed
+        if isinstance(batch_embeddings, list):
+            if len(batch_embeddings) <= 1:
+                return 0.0, 0.0, 0.0
+
+            # Handle tensor conversion
+            try:
+                # Try to stack if all same shape
+                batch_embeddings = torch.stack(batch_embeddings)
+            except:
+                # If dimensions don't match, we'll need to reshape
+                # For simplicity, flatten each embedding
+                try:
+                    batch_embeddings = torch.stack(
+                        [e.view(-1) for e in batch_embeddings]
+                    )
+                except:
+                    return 0.0, 0.0, 0.0
+
+        # Basic validation
+        if not isinstance(batch_embeddings, torch.Tensor):
+            return 0.0, 0.0, 0.0
+
+        batch_size = batch_embeddings.shape[0]
+
+        # Need at least 2 embeddings for comparison
+        if batch_size <= 1:
+            return 0.0, 0.0, 0.0
+
+        # Normalize embeddings for cosine similarity
+        normalized_embeddings = F.normalize(batch_embeddings, p=2, dim=1)
+
+        # Calculate pairwise cosine similarity matrix
+        similarity_matrix = torch.mm(normalized_embeddings, normalized_embeddings.t())
+
+        # Create mask to exclude self-similarity (diagonal elements)
+        mask = torch.ones_like(similarity_matrix) - torch.eye(
+            batch_size, device=similarity_matrix.device
+        )
+
+        # Get non-matching similarities (off-diagonal elements)
+        nonmatching_similarities = similarity_matrix * mask
+
+        # Calculate statistics
+        avg_sim = nonmatching_similarities.sum() / (batch_size * (batch_size - 1))
+        max_sim = nonmatching_similarities.max()
+        min_sim = nonmatching_similarities[mask.bool()].min()
+
+        return avg_sim.item(), max_sim.item(), min_sim.item()
+
+    # Then modify the forward method to include this metric
     def forward(self, context_tokens, target_tokens, span_positions):
         """
         Forward pass of the Text-JEPA model.
@@ -100,6 +163,10 @@ class TextJEPA(nn.Module):
         # Process each span separately
         total_loss = 0.0
         valid_span_count = 0
+
+        # For storing flattened embeddings for pairwise similarity
+        pred_embeddings_flat = []
+        target_embeddings_flat = []
 
         for span_idx in range(num_spans):
             # Lists for this specific span across batch
@@ -148,16 +215,12 @@ class TextJEPA(nn.Module):
                     target_span_batch.append(span_target)
                     pred_span_batch.append(span_pred)
 
+                    # Create flattened embeddings for pairwise similarity
+                    # Use mean embedding for each span to simplify
+                    pred_embeddings_flat.append(span_pred.mean(dim=0))
+                    target_embeddings_flat.append(span_target.mean(dim=0))
+
                 except Exception as e:
-                    print(
-                        f"Error processing span {span_idx} for batch item {batch_idx}: {e}"
-                    )
-                    print(
-                        f"Span positions: start={start_pos.item()}, end={end_pos.item()}"
-                    )
-                    print(
-                        f"Context shape: {context_repr.shape}, Target shape: {target_repr.shape}"
-                    )
                     continue
 
             # Add this span's batch results to the overall lists
@@ -174,11 +237,26 @@ class TextJEPA(nn.Module):
                 0.0, device=context_tokens.device, requires_grad=True
             )
 
+        # Calculate pairwise similarity for embeddings
+        avg_pred_similarity, max_pred_similarity, min_pred_similarity = (
+            self._calculate_batch_pairwise_similarity(pred_embeddings_flat)
+        )
+
+        avg_target_similarity, max_target_similarity, min_target_similarity = (
+            self._calculate_batch_pairwise_similarity(target_embeddings_flat)
+        )
+
         # Compute additional metrics
         metrics = {
             "loss": avg_loss.item(),
             "predicted_reprs": all_pred_reprs,
             "target_reprs": all_target_reprs,
+            "avg_nonmatching_pred_similarity": avg_pred_similarity,
+            "max_nonmatching_pred_similarity": max_pred_similarity,
+            "min_nonmatching_pred_similarity": min_pred_similarity,
+            "avg_nonmatching_target_similarity": avg_target_similarity,
+            "max_nonmatching_target_similarity": max_target_similarity,
+            "min_nonmatching_target_similarity": min_target_similarity,
         }
 
         # Update target encoder with EMA

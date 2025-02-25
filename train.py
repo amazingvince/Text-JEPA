@@ -214,9 +214,11 @@ def main():
 
     # Main training loop - runs until max_steps reached
     while global_step < max_steps and not early_stop:
+        # Reset train metrics for this epoch
+        train_metrics.reset()
+
         # Training
         model.train()
-        train_metrics.reset()
 
         train_progress_bar = tqdm(
             enumerate(train_dataloader),
@@ -227,35 +229,15 @@ def main():
             ),
         )
 
+        # Process batches until evaluation or end of epoch
+        steps_since_eval = 0
         for step_idx, batch in train_progress_bar:
-            # Check if it's time for evaluation
-            if global_step > 0 and global_step % eval_steps == 0:
-                break
-
             # Move batch to device
             context_input_ids = batch["context_input_ids"].to(device)
             context_attention_mask = batch["context_attention_mask"].to(device)
             target_input_ids = batch["target_input_ids"].to(device)
             target_attention_mask = batch["target_attention_mask"].to(device)
             span_positions = batch["span_positions"].to(device)
-
-            # Debugging: print batch information for the first few batches
-            if global_step < 2:
-                print(f"\nStep {global_step} - Batch information:")
-                print(f"Context tokens shape: {context_input_ids.shape}")
-                print(f"Target tokens shape: {target_input_ids.shape}")
-                print(f"Span positions shape: {span_positions.shape}")
-                for i in range(min(2, span_positions.size(0))):
-                    print(f"Example {i} spans: {span_positions[i]}")
-
-                    # Check if any spans are invalid
-                    for j in range(span_positions.size(1)):
-                        start, end = span_positions[i, j]
-                        if end <= start or start < 0 or end > context_input_ids.size(1):
-                            print(
-                                f"WARNING: Invalid span at position ({i}, {j}): start={start}, end={end}"
-                            )
-                            print(f"Context length: {context_input_ids.size(1)}")
 
             try:
                 # Forward pass
@@ -269,6 +251,15 @@ def main():
                 optimizer.zero_grad()
                 loss.backward()
 
+                # grad_norm
+                total_norm = 0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm**0.5
+                writer.add_scalar("train/grad_norm", total_norm, global_step)
+
                 # Clip gradients
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
@@ -276,46 +267,101 @@ def main():
                 )
 
             except Exception as e:
-                print(f"Error during forward/backward pass: {e}")
-                print(
+                logger.error(f"Error during forward/backward pass: {e}")
+                logger.error(
                     f"Input shapes: context={context_input_ids.shape}, target={target_input_ids.shape}, spans={span_positions.shape}"
                 )
                 # Skip this batch but continue training
                 continue
 
+            # Update parameters (only once!)
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
 
-                # Update metrics
-                train_metrics.update(
-                    batch_metrics["predicted_reprs"], batch_metrics["target_reprs"]
-                )
+            # Update metrics
+            train_metrics.update(
+                batch_metrics["predicted_reprs"],
+                batch_metrics["target_reprs"],
+                {  # Add this new parameter with non-matching similarity metrics
+                    "avg_nonmatching_pred_similarity": batch_metrics[
+                        "avg_nonmatching_pred_similarity"
+                    ],
+                    "max_nonmatching_pred_similarity": batch_metrics[
+                        "max_nonmatching_pred_similarity"
+                    ],
+                    "min_nonmatching_pred_similarity": batch_metrics[
+                        "min_nonmatching_pred_similarity"
+                    ],
+                    "avg_nonmatching_target_similarity": batch_metrics[
+                        "avg_nonmatching_target_similarity"
+                    ],
+                    "max_nonmatching_target_similarity": batch_metrics[
+                        "max_nonmatching_target_similarity"
+                    ],
+                    "min_nonmatching_target_similarity": batch_metrics[
+                        "min_nonmatching_target_similarity"
+                    ],
+                },
+            )
 
-                optimizer.step()
-                if scheduler is not None:
-                    scheduler.step()
+            # Update global step
+            global_step += 1
+            steps_since_eval += 1
 
-                # Update global step
-                global_step += 1
-
-                # Update progress bar
-                metrics_dict = train_metrics.compute()
-                train_progress_bar.set_postfix(
-                    {
-                        "loss": loss.item(),
-                        "l2_loss": metrics_dict["l2_loss"],
-                        "cosine_sim": metrics_dict["cosine_similarity"],
-                        "lr": optimizer.param_groups[0]["lr"],
-                        "step": global_step,
-                    }
-                )
+            # Update progress bar
+            metrics_dict = train_metrics.compute()
+            train_progress_bar.set_postfix(
+                {
+                    "loss": loss.item(),
+                    "cosine_sim": metrics_dict["cosine_similarity"],
+                    "avg_pred_sim": metrics_dict[
+                        "avg_nonmatching_pred_similarity"
+                    ],  # Add this
+                    "avg_target_sim": metrics_dict[
+                        "avg_nonmatching_target_similarity"
+                    ],  # Add this
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "step": global_step,
+                }
+            )
 
             # Log to tensorboard
             writer.add_scalar("train/loss", loss.item(), global_step)
             writer.add_scalar(
                 "train/cosine_similarity",
                 metrics_dict["cosine_similarity"],
+                global_step,
+            )
+            # Add these new metrics to tensorboard
+            writer.add_scalar(
+                "train/avg_nonmatching_pred_similarity",
+                metrics_dict["avg_nonmatching_pred_similarity"],
+                global_step,
+            )
+            writer.add_scalar(
+                "train/max_nonmatching_pred_similarity",
+                metrics_dict["max_nonmatching_pred_similarity"],
+                global_step,
+            )
+            writer.add_scalar(
+                "train/min_nonmatching_pred_similarity",
+                metrics_dict["min_nonmatching_pred_similarity"],
+                global_step,
+            )
+            writer.add_scalar(
+                "train/avg_nonmatching_target_similarity",
+                metrics_dict["avg_nonmatching_target_similarity"],
+                global_step,
+            )
+            writer.add_scalar(
+                "train/max_nonmatching_target_similarity",
+                metrics_dict["max_nonmatching_target_similarity"],
+                global_step,
+            )
+            writer.add_scalar(
+                "train/min_nonmatching_target_similarity",
+                metrics_dict["min_nonmatching_target_similarity"],
                 global_step,
             )
             writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
@@ -346,6 +392,10 @@ def main():
             # Check if max steps reached
             if global_step >= max_steps:
                 early_stop = True
+                break
+
+            # Check if it's time for evaluation
+            if global_step % eval_steps == 0:
                 break
 
         # Evaluation
@@ -383,7 +433,28 @@ def main():
 
                     # Update metrics
                     val_metrics.update(
-                        batch_metrics["predicted_reprs"], batch_metrics["target_reprs"]
+                        batch_metrics["predicted_reprs"],
+                        batch_metrics["target_reprs"],
+                        {  # Add this new parameter with non-matching similarity metrics
+                            "avg_nonmatching_pred_similarity": batch_metrics[
+                                "avg_nonmatching_pred_similarity"
+                            ],
+                            "max_nonmatching_pred_similarity": batch_metrics[
+                                "max_nonmatching_pred_similarity"
+                            ],
+                            "min_nonmatching_pred_similarity": batch_metrics[
+                                "min_nonmatching_pred_similarity"
+                            ],
+                            "avg_nonmatching_target_similarity": batch_metrics[
+                                "avg_nonmatching_target_similarity"
+                            ],
+                            "max_nonmatching_target_similarity": batch_metrics[
+                                "max_nonmatching_target_similarity"
+                            ],
+                            "min_nonmatching_target_similarity": batch_metrics[
+                                "min_nonmatching_target_similarity"
+                            ],
+                        },
                     )
 
                     # Update progress bar
@@ -392,28 +463,63 @@ def main():
                         {
                             "loss": loss.item(),
                             "cosine_sim": metrics_dict["cosine_similarity"],
+                            "avg_pred_sim": metrics_dict[
+                                "avg_nonmatching_pred_similarity"
+                            ],  # Add this
+                            "avg_target_sim": metrics_dict[
+                                "avg_nonmatching_target_similarity"
+                            ],  # Add this
                         }
                     )
 
-                    eval_steps_done += 1
-                    if (
-                        eval_steps_done
-                        >= config["training"]["eval_samples"]
-                        // config["training"]["batch_size"]
-                    ):
-                        break
+                    # Compute validation metrics
+                    val_metrics_dict = val_metrics.compute()
+                    val_loss = val_metrics_dict["l2_loss"]
+                    val_cosine_sim = val_metrics_dict["cosine_similarity"]
 
-            # Compute validation metrics
-            val_metrics_dict = val_metrics.compute()
-            val_loss = val_metrics_dict["l2_loss"]
-            val_cosine_sim = val_metrics_dict["cosine_similarity"]
+                    # Log validation metrics
+                    logger.info(
+                        f"Validation at step {global_step} - Loss: {val_loss:.4f}, "
+                        f"Cosine Similarity: {val_cosine_sim:.4f}, "
+                        f"Avg Pred Similarity: {val_metrics_dict['avg_nonmatching_pred_similarity']:.4f}, "
+                        f"Avg Target Similarity: {val_metrics_dict['avg_nonmatching_target_similarity']:.4f}"
+                    )
 
-            # Log validation metrics
-            logger.info(
-                f"Validation at step {global_step} - Loss: {val_loss:.4f}, Cosine Similarity: {val_cosine_sim:.4f}"
-            )
-            writer.add_scalar("val/loss", val_loss, global_step)
-            writer.add_scalar("val/cosine_similarity", val_cosine_sim, global_step)
+                    writer.add_scalar("val/loss", val_loss, global_step)
+                    writer.add_scalar(
+                        "val/cosine_similarity", val_cosine_sim, global_step
+                    )
+                    # Add these new metrics to tensorboard for validation
+                    writer.add_scalar(
+                        "val/avg_nonmatching_pred_similarity",
+                        val_metrics_dict["avg_nonmatching_pred_similarity"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "val/max_nonmatching_pred_similarity",
+                        val_metrics_dict["max_nonmatching_pred_similarity"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "val/min_nonmatching_pred_similarity",
+                        val_metrics_dict["min_nonmatching_pred_similarity"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "val/avg_nonmatching_target_similarity",
+                        val_metrics_dict["avg_nonmatching_target_similarity"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "val/max_nonmatching_target_similarity",
+                        val_metrics_dict["max_nonmatching_target_similarity"],
+                        global_step,
+                    )
+                    writer.add_scalar(
+                        "val/min_nonmatching_target_similarity",
+                        val_metrics_dict["min_nonmatching_target_similarity"],
+                        global_step,
+                    )
 
             # Save checkpoint if validation loss improves
             if val_loss < best_val_loss:
