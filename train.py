@@ -79,6 +79,18 @@ def parse_args():
         default=None,
         help="Override model initialization method from config",
     )
+    # Add new arguments for gradient checkpointing and accumulation
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing to save memory",
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=None,
+        help="Number of steps to accumulate gradients over",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +104,111 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+
+
+def train_with_accumulation(
+    model, batch, optimizer, config, global_step, train_metrics, device, writer, args
+):
+    """
+    Process a single training step with gradient accumulation support
+
+    Args:
+        model: The Text-JEPA model
+        batch: The current batch of data
+        optimizer: The optimizer
+        config: Configuration dictionary
+        global_step: Current global step counter
+        train_metrics: Metrics tracker
+        device: Training device
+        writer: TensorBoard writer
+        args: Command line arguments
+
+    Returns:
+        loss: The loss value
+        metrics_dict: Dictionary of metrics
+    """
+    # Get gradient accumulation steps from config
+    accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
+
+    # Only zero gradients at the beginning of accumulation cycle
+    if global_step % accumulation_steps == 0:
+        optimizer.zero_grad()
+
+    # Move batch to device
+    context_input_ids = batch["context_input_ids"].to(device)
+    context_attention_mask = batch["context_attention_mask"].to(device)
+    target_input_ids = batch["target_input_ids"].to(device)
+    target_attention_mask = batch["target_attention_mask"].to(device)
+    span_positions = batch["span_positions"].to(device)
+
+    # Forward pass
+    loss, batch_metrics = model(
+        context_tokens=context_input_ids,
+        target_tokens=target_input_ids,
+        span_positions=span_positions,
+    )
+
+    # Scale the loss to account for gradient accumulation
+    loss = loss / accumulation_steps
+
+    # Backward pass
+    loss.backward()
+
+    # Update metrics
+    train_metrics.update(
+        batch_metrics["predicted_reprs"],
+        batch_metrics["target_reprs"],
+        {
+            "avg_nonmatching_pred_similarity": batch_metrics[
+                "avg_nonmatching_pred_similarity"
+            ],
+            "max_nonmatching_pred_similarity": batch_metrics[
+                "max_nonmatching_pred_similarity"
+            ],
+            "min_nonmatching_pred_similarity": batch_metrics[
+                "min_nonmatching_pred_similarity"
+            ],
+            "avg_nonmatching_target_similarity": batch_metrics[
+                "avg_nonmatching_target_similarity"
+            ],
+            "max_nonmatching_target_similarity": batch_metrics[
+                "max_nonmatching_target_similarity"
+            ],
+            "min_nonmatching_target_similarity": batch_metrics[
+                "min_nonmatching_target_similarity"
+            ],
+        },
+    )
+
+    # Only update weights at the end of accumulation cycle
+    if (global_step + 1) % accumulation_steps == 0 or (
+        global_step + 1 == config["training"]["max_steps"]
+    ):
+        # Calculate gradient norm for monitoring
+        total_norm = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm**0.5
+        writer.add_scalar("train/grad_norm", total_norm, global_step)
+
+        if args.use_wandb:
+            wandb.log({"train/grad_norm": total_norm}, step=global_step)
+
+        # Clip gradients
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            config["training"]["max_grad_norm"],
+        )
+
+        # Update parameters
+        optimizer.step()
+
+    # Compute metrics
+    metrics_dict = train_metrics.compute()
+
+    return loss * accumulation_steps, metrics_dict  # Return unscaled loss for logging
 
 
 def main():
@@ -123,6 +240,46 @@ def main():
         config["model"]["initialization_method"] = args.model_init_method
         logger.info(
             f"Overriding model initialization method to: {args.model_init_method}"
+        )
+
+    # Override gradient checkpointing if specified
+    if args.gradient_checkpointing:
+        if "model" not in config:
+            config["model"] = {}
+        config["model"]["gradient_checkpointing"] = True
+        logger.info("Gradient checkpointing enabled via command line argument")
+
+    # Override gradient accumulation steps if specified
+    if args.gradient_accumulation_steps is not None:
+        if "training" not in config:
+            config["training"] = {}
+        config["training"][
+            "gradient_accumulation_steps"
+        ] = args.gradient_accumulation_steps
+        logger.info(
+            f"Gradient accumulation steps set to {args.gradient_accumulation_steps}"
+        )
+
+    # Get gradient accumulation steps
+    accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
+
+    # Calculate effective batch size
+    effective_batch_size = config["training"]["batch_size"] * accumulation_steps
+    logger.info(
+        f"Effective batch size: {effective_batch_size} (batch_size: {config['training']['batch_size']} × "
+        f"accumulation_steps: {accumulation_steps})"
+    )
+
+    # Log memory-saving techniques
+    memory_saving_techniques = []
+    if config.get("model", {}).get("gradient_checkpointing", False):
+        memory_saving_techniques.append("gradient checkpointing")
+    if accumulation_steps > 1:
+        memory_saving_techniques.append("gradient accumulation")
+
+    if memory_saving_techniques:
+        logger.info(
+            f"Memory-saving techniques enabled: {', '.join(memory_saving_techniques)}"
         )
 
     # Set random seed
@@ -284,88 +441,41 @@ def main():
         # Process batches until evaluation or end of epoch
         steps_since_eval = 0
         for step_idx, batch in train_progress_bar:
-            # Move batch to device
-            context_input_ids = batch["context_input_ids"].to(device)
-            context_attention_mask = batch["context_attention_mask"].to(device)
-            target_input_ids = batch["target_input_ids"].to(device)
-            target_attention_mask = batch["target_attention_mask"].to(device)
-            span_positions = batch["span_positions"].to(device)
-
             try:
-                # Forward pass
-                loss, batch_metrics = model(
-                    context_tokens=context_input_ids,
-                    target_tokens=target_input_ids,
-                    span_positions=span_positions,
+                # Process a training step with gradient accumulation
+                loss, metrics_dict = train_with_accumulation(
+                    model=model,
+                    batch=batch,
+                    optimizer=optimizer,
+                    config=config,
+                    global_step=global_step,
+                    train_metrics=train_metrics,
+                    device=device,
+                    writer=writer,
+                    args=args,
                 )
 
-                # Backward pass
-                optimizer.zero_grad()
-                loss.backward()
-
-                # Calculate gradient norm for monitoring
-                total_norm = 0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                total_norm = total_norm**0.5
-                writer.add_scalar("train/grad_norm", total_norm, global_step)
-
-                if args.use_wandb:
-                    wandb.log({"train/grad_norm": total_norm}, step=global_step)
-
-                # Clip gradients
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    config["training"]["max_grad_norm"],
-                )
+                # Update scheduler if we've completed an accumulation cycle
+                if (global_step + 1) % accumulation_steps == 0 or (
+                    global_step + 1 == max_steps
+                ):
+                    if scheduler is not None:
+                        scheduler.step()
 
             except Exception as e:
                 logger.error(f"Error during forward/backward pass: {e}")
                 logger.error(
-                    f"Input shapes: context={context_input_ids.shape}, target={target_input_ids.shape}, spans={span_positions.shape}"
+                    f"Input shapes: context={batch['context_input_ids'].shape}, "
+                    f"target={batch['target_input_ids'].shape}, spans={batch['span_positions'].shape}"
                 )
                 # Skip this batch but continue training
                 continue
-
-            # Update parameters
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-
-            # Update metrics
-            train_metrics.update(
-                batch_metrics["predicted_reprs"],
-                batch_metrics["target_reprs"],
-                {
-                    "avg_nonmatching_pred_similarity": batch_metrics[
-                        "avg_nonmatching_pred_similarity"
-                    ],
-                    "max_nonmatching_pred_similarity": batch_metrics[
-                        "max_nonmatching_pred_similarity"
-                    ],
-                    "min_nonmatching_pred_similarity": batch_metrics[
-                        "min_nonmatching_pred_similarity"
-                    ],
-                    "avg_nonmatching_target_similarity": batch_metrics[
-                        "avg_nonmatching_target_similarity"
-                    ],
-                    "max_nonmatching_target_similarity": batch_metrics[
-                        "max_nonmatching_target_similarity"
-                    ],
-                    "min_nonmatching_target_similarity": batch_metrics[
-                        "min_nonmatching_target_similarity"
-                    ],
-                },
-            )
 
             # Update global step
             global_step += 1
             steps_since_eval += 1
 
             # Update progress bar
-            metrics_dict = train_metrics.compute()
             train_progress_bar.set_postfix(
                 {
                     "loss": f"{loss.item():.4f}",

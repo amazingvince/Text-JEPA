@@ -33,6 +33,7 @@ class TargetEncoder(nn.Module):
         # Extract configuration values
         model_name_or_path = model_config.get("name_or_path", "roberta-base")
         initialization_method = model_config.get("initialization_method", "pretrained")
+        self.gradient_checkpointing = model_config.get("gradient_checkpointing", False)
 
         # Create parameter dictionary for custom model configuration
         custom_params = {}
@@ -67,6 +68,15 @@ class TargetEncoder(nn.Module):
             initialization_method=initialization_method,
             model_config=custom_params,
         )
+
+        # Note: The target encoder doesn't need gradient checkpointing since
+        # it's used without gradients during training, but we include the code for consistency
+        # and in case it's ever needed for other purposes
+        if self.gradient_checkpointing and hasattr(
+            self.encoder, "gradient_checkpointing_enable"
+        ):
+            self.encoder.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for Target Encoder")
 
     def forward(self, input_ids, attention_mask=None):
         """

@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Dict, Tuple, Optional
 
+from models.context_encoder import ContextEncoder
+from models.target_encoder import TargetEncoder
+from models.predictor import Predictor
+
 
 class TextJEPA(nn.Module):
     """
@@ -17,25 +21,48 @@ class TextJEPA(nn.Module):
 
     def __init__(
         self,
-        context_encoder,
-        target_encoder,
-        predictor,
-        ema_decay=0.996,
+        config=None,
+        context_encoder=None,
+        target_encoder=None,
+        predictor=None,
     ):
         """
         Initialize the Text-JEPA model.
 
         Args:
-            context_encoder: Module that encodes context tokens
-            target_encoder: Module that encodes target tokens
-            predictor: Module that predicts target representations from context
-            ema_decay: Exponential moving average decay for target encoder updates
+            config: Configuration dictionary
+            context_encoder: Module that encodes context tokens (if None, will be created)
+            target_encoder: Module that encodes target tokens (if None, will be created)
+            predictor: Module that predicts target representations from context (if None, will be created)
         """
         super().__init__()
-        self.context_encoder = context_encoder
-        self.target_encoder = target_encoder
-        self.predictor = predictor
-        self.ema_decay = ema_decay
+
+        # Default configuration if none provided
+        if config is None:
+            config = {}
+
+        # Extract configuration
+        model_config = config.get("model", {})
+        training_config = config.get("training", {})
+
+        # Get EMA decay from config with explicit float conversion
+        self.ema_decay = float(training_config.get("ema_decay", 0.996))
+
+        # Create model components if not provided
+        if context_encoder is None:
+            self.context_encoder = ContextEncoder(model_config=model_config)
+        else:
+            self.context_encoder = context_encoder
+
+        if target_encoder is None:
+            self.target_encoder = TargetEncoder(model_config=model_config)
+        else:
+            self.target_encoder = target_encoder
+
+        if predictor is None:
+            self.predictor = Predictor(model_config=model_config)
+        else:
+            self.predictor = predictor
 
         # Initialize target encoder as a copy of context encoder
         self._initialize_target_encoder()
@@ -124,7 +151,6 @@ class TextJEPA(nn.Module):
 
         return avg_sim.item(), max_sim.item(), min_sim.item()
 
-    # Then modify the forward method to include this metric
     def forward(self, context_tokens, target_tokens, span_positions):
         """
         Forward pass of the Text-JEPA model.
@@ -192,7 +218,10 @@ class TextJEPA(nn.Module):
                     # Predict representation for this span
                     span_pred = self.predictor(
                         context_repr[batch_idx : batch_idx + 1],
-                        (start_pos.item(), end_pos.item()),
+                        (
+                            int(start_pos.item()),
+                            int(end_pos.item()),
+                        ),  # Explicit int conversion
                     )
 
                     # Make sure shapes match (remove batch dimension if needed)
@@ -221,6 +250,9 @@ class TextJEPA(nn.Module):
                     target_embeddings_flat.append(span_target.mean(dim=0))
 
                 except Exception as e:
+                    print(
+                        f"Error processing span {span_idx} for batch item {batch_idx}: {e}"
+                    )
                     continue
 
             # Add this span's batch results to the overall lists
@@ -280,3 +312,38 @@ class TextJEPA(nn.Module):
             representations: Encoded representations [batch_size, seq_length, hidden_size]
         """
         return self.context_encoder(tokens, attention_mask)
+
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a Text-JEPA model from a configuration dictionary.
+
+        Args:
+            config: Configuration dictionary with model settings
+
+        Returns:
+            model: Initialized Text-JEPA model
+        """
+
+        # Get model configuration
+        model_config = config.get("model", {})
+
+        # Get training configuration
+        training_config = config.get("training", {})
+        ema_decay = training_config.get("ema_decay", 0.996)
+
+        # Create context encoder, target encoder, and predictor
+        context_encoder = ContextEncoder(model_config)
+        target_encoder = TargetEncoder(model_config)
+        predictor = Predictor(model_config)
+
+        # Create Text-JEPA model
+        model = cls(
+            context_encoder=context_encoder,
+            target_encoder=target_encoder,
+            predictor=predictor,
+            ema_decay=ema_decay,
+        )
+
+        return model

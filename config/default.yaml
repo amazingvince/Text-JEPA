@@ -37,6 +37,7 @@ model:
   local_attention: 128
   global_attn_every_n_layers: 3
   norm_eps:  0.00001
+  gradient_checkpointing: true   # Enable gradient checkpointing to save memory
 
 # Data configuration
 data:
@@ -52,15 +53,16 @@ data:
 # Training configuration
 training:
   batch_size: 8
+  gradient_accumulation_steps: 4  # Number of steps to accumulate gradients
   max_steps: 100000
   eval_steps: 1000
   eval_samples: 1000
   save_steps: 5000
-  learning_rate: 2.0e-6
+  learning_rate: 1.0e-5
   weight_decay: 0.01
   warmup_steps: 1000
   max_grad_norm: 1.0
-  ema_decay: 0.996  # EMA decay for target encoder update
+  ema_decay: 0.99  # EMA decay for target encoder update
   scheduler: "linear_warmup_cosine_decay"  # Options: "linear_warmup_cosine_decay", "linear_warmup"
 
 tracking:

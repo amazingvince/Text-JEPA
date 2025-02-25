@@ -31,6 +31,7 @@ class ContextEncoder(nn.Module):
         # Extract configuration values
         model_name_or_path = model_config.get("name_or_path", "roberta-base")
         initialization_method = model_config.get("initialization_method", "pretrained")
+        self.gradient_checkpointing = model_config.get("gradient_checkpointing", False)
 
         # Create parameter dictionary for custom model configuration
         custom_params = {}
@@ -65,6 +66,13 @@ class ContextEncoder(nn.Module):
             initialization_method=initialization_method,
             model_config=custom_params,
         )
+
+        # Enable gradient checkpointing if requested
+        if self.gradient_checkpointing and hasattr(
+            self.encoder, "gradient_checkpointing_enable"
+        ):
+            self.encoder.gradient_checkpointing_enable()
+            print("Gradient checkpointing enabled for Context Encoder")
 
     def forward(self, input_ids, attention_mask=None):
         """
