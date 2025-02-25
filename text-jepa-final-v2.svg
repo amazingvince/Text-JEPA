@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 700">
+  <!-- Background and Title -->
+  <rect width="900" height="700" fill="#f9f9fa" />
+  <text x="450" y="40" font-family="Arial" font-size="24" font-weight="bold" text-anchor="middle" fill="#333">Text-JEPA: Joint-Embedding Predictive Architecture for NLP</text>
+
+  <!-- Text Input Section -->
+  <rect x="50" y="70" width="800" height="70" rx="5" fill="#e6f2ff" stroke="#2980b9" stroke-width="2" />
+  <text x="60" y="90" font-family="Arial" font-size="16" font-weight="bold" fill="#2980b9">Input Text:</text>
+  <text x="60" y="120" font-family="Courier New" font-size="14" fill="#333">"The quick brown fox jumps over the lazy dog. Scientists have discovered a new species."</text>
+
+  <!-- Target and Context Identification -->
+  <rect x="50" y="155" width="800" height="85" rx="5" fill="#eafaf1" stroke="#27ae60" stroke-width="2" />
+  <text x="60" y="175" font-family="Arial" font-size="16" font-weight="bold" fill="#27ae60">Span Selection:</text>
+  <text x="60" y="205" font-family="Courier New" font-size="14" fill="#333">[CLS] The quick brown fox <tspan fill="#e74c3c" font-weight="bold">jumps over the lazy dog.</tspan> <tspan fill="#8e44ad" font-weight="bold">Scientists have discovered</tspan> a new species.</text>
+  
+  <!-- Legend for spans -->
+  <rect x="80" y="225" width="20" height="10" fill="#e74c3c" />
+  <text x="105" y="235" font-family="Arial" font-size="12" fill="#333">Target Span 1</text>
+  <rect x="220" y="225" width="20" height="10" fill="#8e44ad" />
+  <text x="245" y="235" font-family="Arial" font-size="12" fill="#333">Target Span 2</text>
+  <rect x="360" y="225" width="20" height="10" fill="#333" />
+  <text x="385" y="235" font-family="Arial" font-size="12" fill="#333">Context (tokens not in target spans)</text>
+
+  <!-- Main Architecture Diagram -->
+  <rect x="50" y="255" width="800" height="380" rx="5" fill="#fff" stroke="#bdc3c7" stroke-width="2" />
+  
+  <!-- Context Encoder Branch -->
+  <rect x="80" y="275" width="320" height="70" rx="5" fill="#d6eaf8" stroke="#3498db" stroke-width="2" />
+  <text x="240" y="310" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#3498db">Context Encoder</text>
+  <text x="240" y="330" font-family="Arial" font-size="12" text-anchor="middle" fill="#666">(12-layer Transformer with RoPE)</text>
+  
+  <!-- Target Encoder Branch -->
+  <rect x="500" y="275" width="320" height="70" rx="5" fill="#d6eaf8" stroke="#3498db" stroke-width="2" />
+  <text x="660" y="310" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#3498db">Target Encoder</text>
+  <text x="660" y="330" font-family="Arial" font-size="12" text-anchor="middle" fill="#666">(12-layer Transformer with RoPE)</text>
+  
+  <!-- EMA update positioned in whitespace between encoders and inputs -->
+  <path d="M240 360 C350 355 550 355 660 360" stroke="#e74c3c" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowhead_red)" />
+  <text x="450" y="350" font-family="Arial" font-size="12" font-weight="bold" fill="#e74c3c" text-anchor="middle">EMA Update</text>
+  
+  <!-- Process Descriptions -->
+  <rect x="80" y="385" width="320" height="50" rx="5" fill="#e8f8f5" stroke="#1abc9c" stroke-width="2" />
+  <text x="90" y="405" font-family="Arial" font-size="12" font-weight="bold" fill="#1abc9c">Context Input:</text>
+  <text x="90" y="425" font-family="Courier New" font-size="10" fill="#333">[CLS] The quick ___ ___ ___ ___ a new species.</text>
+  
+  <rect x="500" y="385" width="320" height="50" rx="5" fill="#e8f8f5" stroke="#1abc9c" stroke-width="2" />
+  <text x="510" y="405" font-family="Arial" font-size="12" font-weight="bold" fill="#1abc9c">Target Input:</text>
+  <text x="510" y="425" font-family="Courier New" font-size="10" fill="#333">Full text with all tokens included</text>
+  
+  <!-- Embeddings -->
+  <rect x="80" y="455" width="320" height="60" rx="5" fill="#f9e8ff" stroke="#8e44ad" stroke-width="2" />
+  <text x="90" y="475" font-family="Arial" font-size="12" font-weight="bold" fill="#8e44ad">Context Representation:</text>
+  <text x="90" y="495" font-family="Arial" font-size="10" fill="#333">r_c = Context Encoder(context tokens)</text>
+  
+  <rect x="500" y="455" width="320" height="60" rx="5" fill="#f9e8ff" stroke="#8e44ad" stroke-width="2" />
+  <text x="510" y="475" font-family="Arial" font-size="12" font-weight="bold" fill="#8e44ad">Target Representations:</text>
+  <text x="510" y="495" font-family="Arial" font-size="10" fill="#333">r_t1 = Target Encoder("jumps over the lazy dog.")</text>
+  <text x="510" y="510" font-family="Arial" font-size="10" fill="#333">r_t2 = Target Encoder("Scientists have discovered")</text>
+  
+  <!-- Predictor -->
+  <rect x="80" y="535" width="320" height="75" rx="5" fill="#ffe9e3" stroke="#e74c3c" stroke-width="2" />
+  <text x="240" y="560" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#e74c3c">Predictor</text>
+  <text x="240" y="580" font-family="Arial" font-size="12" text-anchor="middle" fill="#666">(6-layer Transformer with position info)</text>
+  <text x="90" y="600" font-family="Arial" font-size="10" fill="#333">p_t1 = Predictor(r_c, span_pos="jumps over...")</text>
+  
+  <!-- Loss Function -->
+  <rect x="500" y="535" width="320" height="75" rx="5" fill="#fff5e6" stroke="#f39c12" stroke-width="2" />
+  <text x="660" y="560" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#f39c12">Loss Calculation</text>
+  <text x="510" y="585" font-family="Arial" font-size="10" fill="#333">L2 loss between predictions and targets:</text>
+  <text x="510" y="600" font-family="Arial" font-size="10" fill="#333">span_loss = || p_t1 - r_t1 ||² + || p_t2 - r_t2 ||²</text>
+  
+  <!-- Arrows -->
+  <!-- Input to encoders -->
+  <path d="M450 240 L240 275" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  <path d="M450 240 L660 275" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  
+  <!-- Encoders to process -->
+  <path d="M240 345 L240 385" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  <path d="M660 345 L660 385" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  
+  <!-- Process to representations -->
+  <path d="M240 435 L240 455" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  <path d="M660 435 L660 455" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  
+  <!-- Context rep to predictor -->
+  <path d="M240 515 L240 535" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  
+  <!-- Target rep to loss -->
+  <path d="M660 515 L660 535" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  
+  <!-- Predictor to loss -->
+  <path d="M400 570 L500 570" stroke="#666" stroke-width="2" fill="none" marker-end="url(#arrowhead)" />
+  
+  <!-- Legend and Notes -->
+  <rect x="50" y="650" width="800" height="20" fill="none" stroke="none" />
+  <text x="450" y="665" font-family="Arial" font-size="14" text-anchor="middle" fill="#666">Pretraining objective: Predict representations of target spans from context in embedding space</text>
+  
+  <!-- Arrow Definitions -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#666" />
+    </marker>
+    <marker id="arrowhead_red" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#e74c3c" />
+    </marker>
+  </defs>
+</svg>
