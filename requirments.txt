@@ -7,3 +7,5 @@ tensorboard>=2.8.0
 scikit-learn>=1.0.0
 datasets>=2.0.0
 wandb>=0.15.0
+evaluate
+accelerate
